@@ -1,10 +1,11 @@
 /* =========================================================================
-   OFFLINE AUDIO GENERATION — ElevenLabs "Alice" with seamless TTS Fallback
+   OFFLINE AUDIO GENERATION — ElevenLabs "Alice"
    Usage:  node scripts/generate_audio.js           (skips files that exist)
            node scripts/generate_audio.js --force   (re-generate everything)
+           node scripts/generate_audio.js --from 114 (re-generate from index 114 onwards)
    • Reads phrases from src/utils/lessonScript.js (same text the UI shows)
    • Primary: ElevenLabs API (Voice: Xb7hH8MSUJpSbSDYk0k2)
-   • Fallback: Google TTS (generates authentic .mp3 files when ElevenLabs quota is reached)
+   • Fallback: Google TTS (if quota is exceeded)
    • Saves MP3s to public/assets/audio/ and writes src/utils/audioMap.js
    ========================================================================= */
 import fs from 'node:fs';
@@ -86,6 +87,9 @@ async function fetchGoogleTTS(text) {
 
 async function main() {
   const force = process.argv.includes('--force');
+  const fromArgIdx = process.argv.indexOf('--from');
+  const fromIndex = fromArgIdx !== -1 ? parseInt(process.argv[fromArgIdx + 1], 10) : 1;
+
   const apiKey = readEnvKey();
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
@@ -96,7 +100,7 @@ async function main() {
     return true;
   });
 
-  console.log(`Starting audio generation for ${phrases.length} unique phrases...`);
+  console.log(`Starting audio generation for ${phrases.length} unique phrases (forcing from ${fromIndex})...`);
 
   // Load existing audioMap if available
   let map = {};
@@ -112,19 +116,22 @@ async function main() {
   let elevenLabsQuotaExceeded = false;
 
   for (const [i, p] of phrases.entries()) {
+    const itemNum = i + 1; // 1-based index
     const hash = crypto.createHash('md5').update(p.text).digest('hex').slice(0, 6);
     const fileName = `audio_${slugify(p.text)}_${hash}.mp3`;
     const filePath = path.join(OUT_DIR, fileName);
     const publicPath = `/assets/audio/${fileName}`;
 
-    if (!force && fs.existsSync(filePath) && fs.statSync(filePath).size > 0) {
+    const shouldRedo = force || (itemNum >= fromIndex);
+
+    if (!shouldRedo && fs.existsSync(filePath) && fs.statSync(filePath).size > 0) {
       map[p.text] = publicPath;
       skipped++;
       continue;
     }
 
     const s = STYLE_SETTINGS[p.style] || STYLE_SETTINGS.statement;
-    process.stdout.write(`[${i + 1}/${phrases.length}] (${p.style}) ${p.text.slice(0, 50)}… `);
+    process.stdout.write(`[${itemNum}/${phrases.length}] (${p.style}) ${p.text.slice(0, 50)}… `);
 
     let audioBuffer = null;
 
@@ -142,14 +149,14 @@ async function main() {
         } else {
           const errText = await res.text();
           if (res.status === 401 && errText.includes('quota_exceeded')) {
-            console.log('\n[ElevenLabs 10k monthly quota reached. Seamlessly switching to MP3 generator for remaining files]');
+            console.log('\n[ElevenLabs quota reached. Switching to fallback for remaining]');
             elevenLabsQuotaExceeded = true;
           } else {
-            console.log(`(ElevenLabs error: ${res.status})`);
+            console.log(`(ElevenLabs error ${res.status}: ${errText.slice(0, 80)})`);
           }
         }
       } catch (e) {
-        console.log(`(ElevenLabs network error)`);
+        console.log(`(ElevenLabs network error: ${e.message})`);
       }
     }
 
@@ -157,7 +164,7 @@ async function main() {
       try {
         audioBuffer = await fetchGoogleTTS(p.text);
         fallbackCount++;
-        console.log('✔ (MP3 generated)');
+        console.log('✔ (Fallback generated)');
       } catch (e) {
         failed++;
         console.log(`✖ ${e.message}`);
@@ -173,14 +180,15 @@ async function main() {
       saveMap(map);
     }
 
-    await sleep(200);
+    await sleep(250);
   }
 
   saveMap(map);
 
   console.log(`\n========================================`);
   console.log(`DONE! Total phrases: ${phrases.length}`);
-  console.log(`• ElevenLabs Alice MP3s: ${made + skipped}`);
+  console.log(`• ElevenLabs Alice MP3s newly generated: ${made}`);
+  console.log(`• Reused previous: ${skipped}`);
   console.log(`• Fallback MP3s: ${fallbackCount}`);
   console.log(`• Failed: ${failed}`);
   console.log(`• Map entries: ${Object.keys(map).length}/${phrases.length}`);
